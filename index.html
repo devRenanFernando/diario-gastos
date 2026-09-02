@@ -298,7 +298,8 @@
   .year-view .year-nav button:hover{background:var(--surface-3);}
   .year-view .year-nav button:disabled{opacity:.3;cursor:not-allowed;}
 
-  .heatmap-wrap{ background:var(--surface);border:1px solid var(--border);border-radius:20px; padding:18px;overflow-x:auto;margin-bottom:36px; }
+  .heatmap-wrap{ background:var(--surface);border:1px solid var(--border);border-radius:20px; padding:18px;margin-bottom:36px; }
+  .heatmap-scroll{ overflow-x:auto; padding-bottom:4px; }
   .heatmap-grid{ display:grid; grid-template-columns:repeat(53, minmax(10px, 1fr)); gap:3px;min-width:580px; }
   .heatmap-cell{ aspect-ratio:1/1;border-radius:3px;cursor:pointer; transition:transform .1s, box-shadow .1s;position:relative; }
   .heatmap-cell:hover{transform:scale(1.15);z-index:2;box-shadow:0 2px 8px rgba(0,0,0,.3);}
@@ -308,7 +309,7 @@
   .heatmap-cell.spent2{background:rgba(242,166,90,.6);}
   .heatmap-cell.spent3{background:rgba(242,166,90,.85);}
   .heatmap-cell.spent4{background:var(--spent);}
-  .heatmap-legend{ display:flex;align-items:center;gap:6px;margin-top:12px;font-size:11px;color:var(--text-faint); font-family:var(--font-mono); }
+  .heatmap-legend{ display:flex;align-items:center;gap:6px;margin-top:12px;font-size:11px;color:var(--text-faint); font-family:var(--font-mono); justify-content:center; flex-wrap:wrap; }
   .heatmap-legend .hml{width:12px;height:12px;border-radius:3px;}
   .heatmap-loading{ text-align:center;padding:40px;color:var(--text-faint);font-family:var(--font-mono); }
   .month-labels{
@@ -485,8 +486,10 @@
       </div>
     </div>
     <div class="heatmap-wrap">
-      <div class="month-labels" id="monthLabels"></div>
-      <div class="heatmap-grid" id="heatmapGrid"></div>
+      <div class="heatmap-scroll">
+        <div class="month-labels" id="monthLabels"></div>
+        <div class="heatmap-grid" id="heatmapGrid"></div>
+      </div>
       <div class="heatmap-legend">
         <span>Menos</span>
         <i class="hml" style="background:var(--surface-2);border:1px dashed var(--border);"></i>
@@ -521,6 +524,10 @@
     <button id="exportMonthBtn" type="button">📥 Exportar mês (CSV)</button>
     <button id="exportYearBtn" type="button">📥 Exportar ano (CSV)</button>
     <button id="printBtn" type="button">🖨 Imprimir resumo</button>
+    <label style="display:inline-block;cursor:pointer;">
+      <button type="button" style="pointer-events:none;">📤 Importar CSV</button>
+      <input type="file" id="importCsvInput" accept=".csv" style="display:none;">
+    </label>
   </div>
 
   <div class="charts">
@@ -2114,6 +2121,107 @@
   document.getElementById("todayBtn").addEventListener("click", async ()=>{
     viewYear = today.getFullYear(); viewMonth = today.getMonth();
     await renderCalendar(); await renderDashboard();
+  });
+
+  /* ---------------- CSV import ---------------- */
+  function parseCSV(text){
+    const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
+    const out = [];
+    for(let i=0;i<lines.length;i++){
+      const line = lines[i].trim();
+      if(!line) continue;
+      const row = [];
+      let cur = '', inQ = false;
+      for(let j=0;j<line.length;j++){
+        const ch = line[j];
+        if(inQ){
+          if(ch === '"'){ inQ = false; }
+          else { cur += ch; }
+        } else {
+          if(ch === '"'){ inQ = true; }
+          else if(ch === ';'){ row.push(cur); cur = ''; }
+          else { cur += ch; }
+        }
+      }
+      row.push(cur);
+      out.push(row);
+    }
+    return out;
+  }
+  async function importCSV(file){
+    const text = await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=e=>res(e.target.result); r.onerror=rej; r.readAsText(file); });
+    const rows = parseCSV(text);
+    if(rows.length < 2) throw new Error('CSV vazio');
+    const headers = rows[0].map(h=>h.trim().toLowerCase());
+    const iData = headers.indexOf('data');
+    const iCat  = headers.indexOf('categoria');
+    const iForma= headers.indexOf('forma de pagamento');
+    const iVal  = headers.indexOf('valor');
+    if(iData<0 || iCat<0 || iForma<0 || iVal<0) throw new Error('Cabeçalhos não encontrados. Esperado: Data;Categoria;Forma de pagamento;Valor');
+
+    const imported = {};
+    for(let r=1;r<rows.length;r++){
+      const row = rows[r];
+      if(row.length < 4) continue;
+      const dataStr = row[iData].trim();
+      const parts = dataStr.split('/');
+      if(parts.length !== 3) continue;
+      const d = parseInt(parts[0],10), m = parseInt(parts[1],10)-1, y = parseInt(parts[2],10);
+      if(isNaN(d)||isNaN(m)||isNaN(y)) continue;
+      const valStr = row[iVal].replace(/\./g,'').replace(',','.').trim();
+      const valor = parseFloat(valStr);
+      if(isNaN(valor) || valor <= 0) continue;
+      const categoria = row[iCat].trim();
+      const forma = row[iForma].trim();
+      if(!categoria || !forma) continue;
+
+      const mKey = y+'-'+String(m+1).padStart(2,'0');
+      if(!imported[mKey]) imported[mKey] = {};
+      if(!imported[mKey][d]) imported[mKey][d] = [];
+      imported[mKey][d].push({valor, categoria, forma});
+    }
+
+    for(const [mKey, days] of Object.entries(imported)){
+      const [yStr, moStr] = mKey.split('-');
+      const y = parseInt(yStr,10), m = parseInt(moStr,10)-1;
+      const data = await loadMonth(y,m);
+      for(const [dStr, entries] of Object.entries(days)){
+        const d = parseInt(dStr,10);
+        if(!data[d]){
+          data[d] = { spent: true, entries: entries.map(e=>({...e})) };
+        } else if(data[d].spent === true){
+          data[d].entries.push(...entries.map(e=>({...e})));
+        } else {
+          data[d] = { spent: true, entries: entries.map(e=>({...e})) };
+        }
+      }
+      monthCache[mKey] = data;
+      await saveMonth(y,m);
+    }
+    return Object.keys(imported).length;
+  }
+
+  document.getElementById('importCsvInput').addEventListener('change', async (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    try{
+      showProgress('Importando CSV…');
+      const monthsCount = await importCSV(file);
+      monthCache = {};
+      await loadCategories();
+      await loadMetas();
+      await loadRecorrentes();
+      await renderCalendar();
+      await renderDashboard();
+      if(viewMode==='year'){ yearViewYear = viewYear; await renderYearView(); }
+      hideProgress();
+      toast('CSV importado! ' + monthsCount + ' meses atualizados.');
+    }catch(err){
+      hideProgress();
+      toast('Erro ao importar: ' + err.message);
+      console.error(err);
+    }
+    e.target.value = '';
   });
 
   /* ---------------- init ---------------- */
